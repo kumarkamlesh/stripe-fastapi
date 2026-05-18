@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import stripe
 from fastapi import Depends, FastAPI, HTTPException, Request, Header
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -13,7 +14,11 @@ from sqlalchemy.orm import Session
 
 from database import (
     create_tables, get_db,
-    Payment, Refund, Customer, CheckoutSession, WebhookEvent,
+    Payment, Refund, Customer, CheckoutSession, WebhookEvent, User, RevokedToken,
+)
+from auth import (
+    hash_password, verify_password, create_access_token, get_current_user,
+    bearer_scheme,
 )
 
 load_dotenv()
@@ -67,6 +72,70 @@ class CustomerRequest(BaseModel):
     email: str
     name: Optional[str] = None
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/auth/register", status_code=201)
+async def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    """Register a new user. Email must be unique."""
+    if db.query(User).filter(User.email == body.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = User(
+        email=body.email,
+        name=body.name,
+        hashed_password=hash_password(body.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"id": user.id, "email": user.email, "name": user.name}
+
+
+@app.post("/auth/login")
+async def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """Login with email and password. Returns a Bearer token."""
+    user = db.query(User).filter(User.email == body.email).first()
+    if not user or not verify_password(body.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account deactivated")
+    token, _ = create_access_token(user.id, user.email)
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@app.post("/auth/logout")
+async def logout(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+):
+    """Logout — revokes the current token so it cannot be reused."""
+    from auth import SECRET_KEY, ALGORITHM
+    import jwt as _jwt
+    payload = _jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    jti = payload["jti"]
+    if not db.query(RevokedToken).filter(RevokedToken.jti == jti).first():
+        db.add(RevokedToken(jti=jti))
+        db.commit()
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/me")
+async def me(current_user: User = Depends(get_current_user)):
+    """Return the currently authenticated user's profile."""
+    return {"id": current_user.id, "email": current_user.email, "name": current_user.name}
+
 
 @app.get("/health")
 async def health():
@@ -82,6 +151,7 @@ async def get_config():
 async def create_payment_intent(
     body: PaymentIntentRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Create a Stripe PaymentIntent.
@@ -120,6 +190,7 @@ async def create_payment_intent(
 async def list_payments(
     limit: int = 50,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """List all payments stored in the local database, newest first."""
     rows = (
@@ -147,6 +218,7 @@ async def list_payments(
 async def get_payment(
     payment_intent_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Retrieve status/details of a PaymentIntent.
@@ -179,6 +251,7 @@ async def get_payment(
 async def create_checkout_session(
     body: CheckoutRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Create a Stripe-hosted Checkout Session.
@@ -219,6 +292,7 @@ async def create_checkout_session(
 async def create_refund(
     body: RefundRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Refund a succeeded payment, fully or partially.
@@ -280,6 +354,7 @@ async def create_refund(
 async def retry_payment(
     payment_intent_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Retry a failed payment — returns fresh client_secret for the same PaymentIntent.
@@ -313,6 +388,7 @@ async def retry_payment(
 async def create_customer(
     body: CustomerRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Create a Stripe Customer record with email and optional name.
@@ -336,6 +412,7 @@ async def create_customer(
 async def list_customers(
     limit: int = 50,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """List all customers stored in the local database, newest first."""
     rows = (

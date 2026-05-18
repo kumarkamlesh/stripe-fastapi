@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
+from sqlalchemy import create_engine, Column, Boolean, Integer, String, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 
 DATABASE_URL = "sqlite:///./stripe_payments.db"
@@ -10,6 +10,25 @@ SessionLocal = sessionmaker(bind=engine)
 
 class Base(DeclarativeBase):
     pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=True)
+    hashed_password = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+
+    id = Column(Integer, primary_key=True)
+    jti = Column(String, unique=True, index=True, nullable=False)
+    revoked_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
 class Payment(Base):
