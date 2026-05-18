@@ -47,6 +47,10 @@ Get keys from [Stripe Dashboard → Developers → API Keys](https://dashboard.s
 ### 4. Run server
 
 ```bash
+# Option A — direct
+cd app && python3 main.py
+
+# Option B — uvicorn from project root
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -60,13 +64,15 @@ Open `http://localhost:8000` in browser.
 |--------|----------|-------------|
 | `GET` | `/health` | Health check |
 | `GET` | `/config` | Returns publishable key for frontend |
-| `POST` | `/payments/create-intent` | Create payment intent |
-| `GET` | `/payments/{id}` | Get payment intent status |
+| `POST` | `/payments/create-intent` | Create payment intent (saved to DB) |
+| `GET` | `/payments` | List all payments from DB |
+| `GET` | `/payments/{id}` | Get payment (DB first, falls back to Stripe) |
 | `POST` | `/payments/{id}/retry` | Retry a failed payment |
-| `POST` | `/payments/refund` | Refund a succeeded payment |
-| `POST` | `/checkout/create-session` | Create Stripe hosted checkout session |
-| `POST` | `/customers` | Create Stripe customer |
-| `POST` | `/webhooks/stripe` | Stripe webhook receiver |
+| `POST` | `/payments/refund` | Refund a succeeded payment (saved to DB) |
+| `POST` | `/checkout/create-session` | Create Stripe hosted checkout session (saved to DB) |
+| `POST` | `/customers` | Create Stripe customer (saved to DB) |
+| `GET` | `/customers` | List all customers from DB |
+| `POST` | `/webhooks/stripe` | Stripe webhook receiver (updates DB status) |
 
 ### Request bodies
 
@@ -178,12 +184,46 @@ Server logs will show the event details.
 
 ---
 
+## Database
+
+SQLite database (`app/stripe_payments.db`) auto-created on first run.
+
+| Table | Stores |
+|-------|--------|
+| `payments` | Payment intents — status updated via webhooks |
+| `refunds` | Refunds issued |
+| `customers` | Stripe customers created |
+| `checkout_sessions` | Checkout sessions — status updated on completion |
+| `webhook_events` | All incoming webhook events (idempotent) |
+
+### Inspect the database
+
+```bash
+sqlite3 app/stripe_payments.db
+
+.tables
+SELECT * FROM payments;
+SELECT * FROM customers;
+SELECT * FROM refunds;
+SELECT * FROM webhook_events;
+.quit
+```
+
+Or via API:
+```bash
+curl http://localhost:8000/payments
+curl http://localhost:8000/customers
+```
+
+---
+
 ## Project Structure
 
 ```
 stripe-fastapi/
 ├── app/
-│   └── main.py          # FastAPI app, all routes
+│   ├── main.py          # FastAPI app, all routes
+│   └── database.py      # SQLAlchemy models + SQLite setup
 ├── static/
 │   └── index.html       # Browser test UI
 ├── .env                 # API keys (never commit)
