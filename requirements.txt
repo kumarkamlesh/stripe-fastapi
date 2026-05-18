@@ -12,6 +12,7 @@ pydantic_core==2.46.4
 python-dotenv==1.2.2
 requests==2.34.2
 starlette==1.0.0
+sqlalchemy==2.0.41
 stripe==15.1.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0

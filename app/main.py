@@ -1,12 +1,20 @@
+import json
 import os
+from pathlib import Path
 import stripe
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import Depends, FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+
+from database import (
+    create_tables, get_db,
+    Payment, Refund, Customer, CheckoutSession, WebhookEvent,
+)
 
 load_dotenv()
 
@@ -23,13 +31,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+BASE_DIR = Path(__file__).parent.parent
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+
+@app.on_event("startup")
+def on_startup():
+    create_tables()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve the browser-based payment test UI from static/index.html."""
-    with open("static/index.html") as f:
+    with open(BASE_DIR / "static/index.html") as f:
         return f.read()
 
 
@@ -56,18 +70,19 @@ class CustomerRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Health check endpoint. Returns 200 if server is running."""
     return {"status": "ok"}
 
 
 @app.get("/config")
 async def get_config():
-    """Return Stripe publishable key for use in frontend Stripe.js initialization."""
     return {"publishable_key": PUBLISHABLE_KEY}
 
 
 @app.post("/payments/create-intent")
-async def create_payment_intent(body: PaymentIntentRequest):
+async def create_payment_intent(
+    body: PaymentIntentRequest,
+    db: Session = Depends(get_db),
+):
     """
     Create a Stripe PaymentIntent.
 
@@ -84,6 +99,14 @@ async def create_payment_intent(body: PaymentIntentRequest):
             description=body.description,
             automatic_payment_methods={"enabled": True},
         )
+        db.add(Payment(
+            payment_intent_id=intent.id,
+            amount=intent.amount,
+            currency=intent.currency,
+            description=body.description,
+            status=intent.status,
+        ))
+        db.commit()
         return {
             "client_secret": intent.client_secret,
             "payment_intent_id": intent.id,
@@ -93,13 +116,52 @@ async def create_payment_intent(body: PaymentIntentRequest):
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.get("/payments/{payment_intent_id}")
-async def get_payment(payment_intent_id: str):
-    """
-    Retrieve the current status and details of a PaymentIntent by its ID.
+@app.get("/payments")
+async def list_payments(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """List all payments stored in the local database, newest first."""
+    rows = (
+        db.query(Payment)
+        .order_by(Payment.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "payment_intent_id": r.payment_intent_id,
+            "amount": r.amount,
+            "currency": r.currency,
+            "description": r.description,
+            "status": r.status,
+            "customer_id": r.customer_id,
+            "created_at": r.created_at,
+            "updated_at": r.updated_at,
+        }
+        for r in rows
+    ]
 
-    Useful for checking whether a payment succeeded, failed, or is still pending.
+
+@app.get("/payments/{payment_intent_id}")
+async def get_payment(
+    payment_intent_id: str,
+    db: Session = Depends(get_db),
+):
     """
+    Retrieve status/details of a PaymentIntent.
+
+    Returns local DB record when present (fast path), falls back to live Stripe data.
+    """
+    row = db.query(Payment).filter(Payment.payment_intent_id == payment_intent_id).first()
+    if row:
+        return {
+            "id": row.payment_intent_id,
+            "amount": row.amount,
+            "currency": row.currency,
+            "status": row.status,
+            "source": "db",
+        }
     try:
         intent = stripe.PaymentIntent.retrieve(payment_intent_id)
         return {
@@ -107,19 +169,22 @@ async def get_payment(payment_intent_id: str):
             "amount": intent.amount,
             "currency": intent.currency,
             "status": intent.status,
+            "source": "stripe",
         }
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
 @app.post("/checkout/create-session")
-async def create_checkout_session(body: CheckoutRequest):
+async def create_checkout_session(
+    body: CheckoutRequest,
+    db: Session = Depends(get_db),
+):
     """
     Create a Stripe-hosted Checkout Session.
 
     Returns a session URL that redirects the customer to Stripe's
-    pre-built payment page. No card handling on your server needed.
-    Redirects to /success on completion or /cancel on abort.
+    pre-built payment page. Redirects to /success on completion or /cancel on abort.
     """
     try:
         session = stripe.checkout.Session.create(
@@ -136,13 +201,25 @@ async def create_checkout_session(body: CheckoutRequest):
             success_url="http://localhost:8000/success",
             cancel_url="http://localhost:8000/cancel",
         )
+        db.add(CheckoutSession(
+            session_id=session.id,
+            product_name=body.product_name,
+            amount=body.amount,
+            currency=body.currency,
+            quantity=body.quantity,
+            status=session.status or "open",
+        ))
+        db.commit()
         return {"session_id": session.id, "url": session.url}
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
 @app.post("/payments/refund")
-async def create_refund(body: RefundRequest):
+async def create_refund(
+    body: RefundRequest,
+    db: Session = Depends(get_db),
+):
     """
     Refund a succeeded payment, fully or partially.
 
@@ -176,6 +253,16 @@ async def create_refund(body: RefundRequest):
         if body.amount:
             params["amount"] = body.amount
         refund = stripe.Refund.create(**params)
+
+        db.add(Refund(
+            refund_id=refund.id,
+            payment_intent_id=body.payment_intent_id,
+            amount=refund.amount,
+            reason=body.reason,
+            status=refund.status,
+        ))
+        db.commit()
+
         return {
             "refund_id": refund.id,
             "status": refund.status,
@@ -190,13 +277,14 @@ async def create_refund(body: RefundRequest):
 
 
 @app.post("/payments/{payment_intent_id}/retry")
-async def retry_payment(payment_intent_id: str):
+async def retry_payment(
+    payment_intent_id: str,
+    db: Session = Depends(get_db),
+):
     """
-    Retry a failed payment by returning a fresh client_secret for the same PaymentIntent.
+    Retry a failed payment — returns fresh client_secret for the same PaymentIntent.
 
-    Only works when payment status is requires_payment_method (card declined/failed)
-    or requires_confirmation. The frontend uses the returned client_secret
-    to re-collect card details without creating a new PaymentIntent.
+    Only works when status is requires_payment_method or requires_confirmation.
     """
     try:
         intent = stripe.PaymentIntent.retrieve(payment_intent_id)
@@ -205,6 +293,10 @@ async def retry_payment(payment_intent_id: str):
                 status_code=400,
                 detail=f"Payment status '{intent.status}' cannot be retried. Only failed payments can be retried."
             )
+        row = db.query(Payment).filter(Payment.payment_intent_id == payment_intent_id).first()
+        if row:
+            row.status = intent.status
+            db.commit()
         return {
             "client_secret": intent.client_secret,
             "payment_intent_id": intent.id,
@@ -218,32 +310,66 @@ async def retry_payment(payment_intent_id: str):
 
 
 @app.post("/customers")
-async def create_customer(body: CustomerRequest):
+async def create_customer(
+    body: CustomerRequest,
+    db: Session = Depends(get_db),
+):
     """
     Create a Stripe Customer record with email and optional name.
 
-    Storing customers in Stripe allows attaching payment methods,
-    tracking purchase history, and enabling saved cards for future payments.
+    Storing customers allows attaching payment methods and tracking history.
     """
     try:
         customer = stripe.Customer.create(email=body.email, name=body.name)
+        db.add(Customer(
+            customer_id=customer.id,
+            email=customer.email,
+            name=customer.name,
+        ))
+        db.commit()
         return {"customer_id": customer.id, "email": customer.email}
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
+@app.get("/customers")
+async def list_customers(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """List all customers stored in the local database, newest first."""
+    rows = (
+        db.query(Customer)
+        .order_by(Customer.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "customer_id": r.customer_id,
+            "email": r.email,
+            "name": r.name,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+
+
 @app.post("/webhooks/stripe")
-async def stripe_webhook(request: Request, stripe_signature: str = Header(None)):
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: str = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Receive and process Stripe webhook events.
 
-    Verifies the request signature using STRIPE_WEBHOOK_SECRET to ensure
-    the event came from Stripe. Handles: payment_intent.succeeded,
-    payment_intent.payment_failed, checkout.session.completed,
-    invoice.payment_succeeded.
+    Verifies the request signature using STRIPE_WEBHOOK_SECRET.
+    Handles: payment_intent.succeeded, payment_intent.payment_failed,
+    checkout.session.completed, invoice.payment_succeeded.
 
     Use 'stripe listen --forward-to localhost:8000/webhooks/stripe'
-    during local development to forward events from Stripe CLI.
+    during local development.
     """
     payload = await request.body()
 
@@ -255,19 +381,43 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
     etype = event["type"]
     data  = event["data"]["object"]
 
+    # Idempotency: skip already-processed events
+    if not db.query(WebhookEvent).filter(WebhookEvent.event_id == event["id"]).first():
+        db.add(WebhookEvent(
+            event_id=event["id"],
+            event_type=etype,
+            object_id=data.get("id"),
+            payload=json.dumps(event["data"]),
+        ))
+
     if etype == "payment_intent.succeeded":
         print(f"Payment succeeded: {data['id']} — {data['amount']} {data['currency'].upper()}")
+        row = db.query(Payment).filter(Payment.payment_intent_id == data["id"]).first()
+        if row:
+            row.status = "succeeded"
 
     elif etype == "payment_intent.payment_failed":
         err    = data.get("last_payment_error", {})
         reason = err.get("message", "unknown")
         code   = err.get("decline_code") or err.get("code", "")
         print(f"Payment failed: {data['id']} | reason={reason} | code={code}")
+        row = db.query(Payment).filter(Payment.payment_intent_id == data["id"]).first()
+        if row:
+            row.status = "failed"
 
     elif etype == "checkout.session.completed":
         print(f"Checkout complete: {data['id']}")
+        row = db.query(CheckoutSession).filter(CheckoutSession.session_id == data["id"]).first()
+        if row:
+            row.status = "complete"
 
     elif etype == "invoice.payment_succeeded":
         print(f"Invoice paid: {data['id']}")
 
+    db.commit()
     return {"received": True, "event": etype}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
