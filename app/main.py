@@ -27,7 +27,16 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
 
-app = FastAPI(title="Stripe Payment Gateway")
+tags_metadata = [
+    {"name": "Authentication", "description": "Register, login, logout, and current user."},
+    {"name": "Payments", "description": "Create, retrieve, refund, and retry Stripe PaymentIntents."},
+    {"name": "Checkout", "description": "Stripe-hosted Checkout Sessions."},
+    {"name": "Customers", "description": "Stripe Customer records."},
+    {"name": "Webhooks", "description": "Stripe webhook event receiver."},
+    {"name": "Utility", "description": "Health check and configuration."},
+]
+
+app = FastAPI(title="Stripe Payment Gateway", openapi_tags=tags_metadata)
 
 app.add_middleware(
     CORSMiddleware,
@@ -86,7 +95,7 @@ class LoginRequest(BaseModel):
 # Auth endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/auth/register", status_code=201)
+@app.post("/auth/register", status_code=201, tags=["Authentication"])
 async def register(body: RegisterRequest, db: Session = Depends(get_db)):
     """Register a new user. Email must be unique."""
     if db.query(User).filter(User.email == body.email).first():
@@ -102,7 +111,7 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
     return {"id": user.id, "email": user.email, "name": user.name}
 
 
-@app.post("/auth/login")
+@app.post("/auth/login", tags=["Authentication"])
 async def login(body: LoginRequest, db: Session = Depends(get_db)):
     """Login with email and password. Returns a Bearer token."""
     user = db.query(User).filter(User.email == body.email).first()
@@ -114,7 +123,7 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": token, "token_type": "bearer"}
 
 
-@app.post("/auth/logout")
+@app.post("/auth/logout", tags=["Authentication"])
 async def logout(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -131,23 +140,23 @@ async def logout(
     return {"message": "Logged out successfully"}
 
 
-@app.get("/auth/me")
+@app.get("/auth/me", tags=["Authentication"])
 async def me(current_user: User = Depends(get_current_user)):
     """Return the currently authenticated user's profile."""
     return {"id": current_user.id, "email": current_user.email, "name": current_user.name}
 
 
-@app.get("/health")
+@app.get("/health", tags=["Utility"])
 async def health():
     return {"status": "ok"}
 
 
-@app.get("/config")
+@app.get("/config", tags=["Utility"])
 async def get_config():
     return {"publishable_key": PUBLISHABLE_KEY}
 
 
-@app.post("/payments/create-intent")
+@app.post("/payments/create-intent", tags=["Payments"])
 async def create_payment_intent(
     body: PaymentIntentRequest,
     db: Session = Depends(get_db),
@@ -186,7 +195,7 @@ async def create_payment_intent(
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.get("/payments")
+@app.get("/payments", tags=["Payments"])
 async def list_payments(
     limit: int = 50,
     db: Session = Depends(get_db),
@@ -214,7 +223,7 @@ async def list_payments(
     ]
 
 
-@app.get("/payments/{payment_intent_id}")
+@app.get("/payments/{payment_intent_id}", tags=["Payments"])
 async def get_payment(
     payment_intent_id: str,
     db: Session = Depends(get_db),
@@ -247,7 +256,7 @@ async def get_payment(
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.post("/checkout/create-session")
+@app.post("/checkout/create-session", tags=["Checkout"])
 async def create_checkout_session(
     body: CheckoutRequest,
     db: Session = Depends(get_db),
@@ -288,7 +297,7 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.post("/payments/refund")
+@app.post("/payments/refund", tags=["Payments"])
 async def create_refund(
     body: RefundRequest,
     db: Session = Depends(get_db),
@@ -350,7 +359,7 @@ async def create_refund(
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.post("/payments/{payment_intent_id}/retry")
+@app.post("/payments/{payment_intent_id}/retry", tags=["Payments"])
 async def retry_payment(
     payment_intent_id: str,
     db: Session = Depends(get_db),
@@ -384,7 +393,7 @@ async def retry_payment(
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.post("/customers")
+@app.post("/customers", tags=["Customers"])
 async def create_customer(
     body: CustomerRequest,
     db: Session = Depends(get_db),
@@ -408,7 +417,7 @@ async def create_customer(
         raise HTTPException(status_code=400, detail=str(e.user_message))
 
 
-@app.get("/customers")
+@app.get("/customers", tags=["Customers"])
 async def list_customers(
     limit: int = 50,
     db: Session = Depends(get_db),
@@ -432,7 +441,7 @@ async def list_customers(
     ]
 
 
-@app.post("/webhooks/stripe")
+@app.post("/webhooks/stripe", tags=["Webhooks"])
 async def stripe_webhook(
     request: Request,
     stripe_signature: str = Header(None),
