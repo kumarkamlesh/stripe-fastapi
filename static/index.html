@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stripe Payment Test</title>
+  <script src="https://js.stripe.com/v3/"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container { width: 100%; max-width: 480px; }
+    h1 { font-size: 1.5rem; color: #1a202c; margin-bottom: 6px; }
+    .subtitle { color: #718096; font-size: 0.875rem; margin-bottom: 24px; }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      padding: 28px;
+      margin-bottom: 16px;
+    }
+    .card h2 { font-size: 1rem; font-weight: 600; color: #2d3748; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    label { display: block; font-size: 0.8rem; font-weight: 500; color: #4a5568; margin-bottom: 6px; }
+    input[type="number"], input[type="text"], input[type="email"], select {
+      width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0;
+      border-radius: 8px; font-size: 0.9rem; color: #1a202c;
+      outline: none; transition: border 0.2s;
+    }
+    input:focus, select:focus { border-color: #6772e5; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .field { margin-bottom: 14px; }
+    #card-element {
+      padding: 11px 12px; border: 1px solid #e2e8f0;
+      border-radius: 8px; background: #fff; transition: border 0.2s;
+    }
+    #card-element.StripeElement--focus { border-color: #6772e5; }
+    #card-element.StripeElement--invalid { border-color: #e53e3e; }
+    #card-errors { color: #e53e3e; font-size: 0.8rem; margin-top: 6px; min-height: 18px; }
+    button {
+      width: 100%; padding: 12px; background: #6772e5; color: #fff;
+      border: none; border-radius: 8px; font-size: 0.95rem; font-weight: 600;
+      cursor: pointer; transition: background 0.2s, transform 0.1s;
+    }
+    button:hover:not(:disabled) { background: #5469d4; }
+    button:active:not(:disabled) { transform: scale(0.99); }
+    button:disabled { background: #a0aec0; cursor: not-allowed; }
+    .result {
+      padding: 14px; border-radius: 8px; font-size: 0.85rem;
+      margin-top: 16px; display: none; word-break: break-all;
+    }
+    .result.success { background: #f0fff4; border: 1px solid #9ae6b4; color: #276749; }
+    .result.error   { background: #fff5f5; border: 1px solid #feb2b2; color: #9b2c2c; }
+    .result.info    { background: #ebf8ff; border: 1px solid #90cdf4; color: #2c5282; }
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+      border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .test-cards {
+      background: #fffbeb; border: 1px solid #f6e05e;
+      border-radius: 8px; padding: 14px; font-size: 0.8rem; color: #744210;
+    }
+    .test-cards strong { display: block; margin-bottom: 6px; }
+    .test-cards code {
+      display: block; margin: 3px 0; font-family: monospace;
+      cursor: pointer; padding: 2px 4px; border-radius: 4px;
+    }
+    .test-cards code:hover { background: rgba(0,0,0,0.05); }
+    .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+    .tab {
+      padding: 8px 16px; border-radius: 20px; font-size: 0.85rem; font-weight: 500;
+      cursor: pointer; border: 1px solid #e2e8f0; background: #fff; color: #718096; transition: all 0.2s;
+    }
+    .tab.active { background: #6772e5; color: #fff; border-color: #6772e5; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .badge { font-size: 0.7rem; background: #fed7d7; color: #9b2c2c; padding: 2px 6px; border-radius: 10px; font-weight: 600; }
+    .badge.green { background: #c6f6d5; color: #276749; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Stripe Payment Test</h1>
+  <p class="subtitle">FastAPI + Stripe — test environment</p>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="intent">Payment Intent</div>
+    <div class="tab" data-tab="checkout">Checkout Session</div>
+    <div class="tab" data-tab="refund">Refund</div>
+    <div class="tab" data-tab="customer">Customer</div>
+  </div>
+
+  <!-- ── Payment Intent ── -->
+  <div class="panel active" id="tab-intent">
+    <div class="card">
+      <h2>💳 Pay with Card</h2>
+      <div class="row">
+        <div class="field">
+          <label>Amount (cents)</label>
+          <input type="number" id="pi-amount" value="2999" min="50" />
+        </div>
+        <div class="field">
+          <label>Currency</label>
+          <select id="pi-currency">
+            <option value="usd">USD</option>
+            <option value="eur">EUR</option>
+            <option value="gbp">GBP</option>
+            <option value="inr">INR</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Description (optional)</label>
+        <input type="text" id="pi-description" placeholder="Order #1234" />
+      </div>
+      <div class="field">
+        <label>Card</label>
+        <div id="card-element"></div>
+        <div id="card-errors"></div>
+      </div>
+      <button id="pay-btn" onclick="handlePayment()">
+        Pay <span id="pay-amount">$29.99</span>
+      </button>
+      <div id="pi-result" class="result"></div>
+    </div>
+
+    <div class="test-cards">
+      <strong>🧪 Test Cards (click to copy)</strong>
+      <code onclick="copyCard(this)" title="Visa — succeeds">4242 4242 4242 4242 — Visa success</code>
+      <code onclick="copyCard(this)" title="Visa — 3D Secure auth required">4000 0025 0000 3155 — 3D Secure required</code>
+      <code onclick="copyCard(this)" title="Declined">4000 0000 0000 9995 — Insufficient funds</code>
+      <code onclick="copyCard(this)" title="Declined — do not honor">4000 0000 0000 0002 — Card declined</code>
+      <br/>
+      <span>Use any future expiry, any 3-digit CVC, any ZIP.</span>
+    </div>
+  </div>
+
+  <!-- ── Checkout Session ── -->
+  <div class="panel" id="tab-checkout">
+    <div class="card">
+      <h2>🛒 Checkout Session</h2>
+      <div class="field">
+        <label>Product Name</label>
+        <input type="text" id="cs-name" value="Premium Plan" />
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Amount (cents)</label>
+          <input type="number" id="cs-amount" value="4999" min="50" />
+        </div>
+        <div class="field">
+          <label>Currency</label>
+          <select id="cs-currency">
+            <option value="usd">USD</option>
+            <option value="eur">EUR</option>
+            <option value="gbp">GBP</option>
+            <option value="inr">INR</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Quantity</label>
+        <input type="number" id="cs-qty" value="1" min="1" />
+      </div>
+      <button onclick="handleCheckout()">Create Checkout Session</button>
+      <div id="cs-result" class="result"></div>
+    </div>
+  </div>
+
+  <!-- ── Refund ── -->
+  <div class="panel" id="tab-refund">
+    <div class="card">
+      <h2>↩️ Refund Payment</h2>
+      <div class="field">
+        <label>Payment Intent ID</label>
+        <input type="text" id="rf-pi-id" placeholder="pi_..." />
+      </div>
+      <div class="field">
+        <label>Amount to Refund (cents — leave 0 for full refund)</label>
+        <input type="number" id="rf-amount" value="0" min="0" />
+      </div>
+      <div class="field">
+        <label>Reason</label>
+        <select id="rf-reason">
+          <option value="requested_by_customer">Requested by customer</option>
+          <option value="duplicate">Duplicate</option>
+          <option value="fraudulent">Fraudulent</option>
+        </select>
+      </div>
+      <button onclick="handleRefund()">Issue Refund</button>
+      <div id="rf-result" class="result"></div>
+    </div>
+  </div>
+
+  <!-- ── Customer ── -->
+  <div class="panel" id="tab-customer">
+    <div class="card">
+      <h2>👤 Create Customer</h2>
+      <div class="field">
+        <label>Email</label>
+        <input type="email" id="cu-email" placeholder="customer@example.com" />
+      </div>
+      <div class="field">
+        <label>Name (optional)</label>
+        <input type="text" id="cu-name" placeholder="Jane Doe" />
+      </div>
+      <button onclick="handleCustomer()">Create Customer</button>
+      <div id="cu-result" class="result"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let stripe, cardElement;
+
+  async function init() {
+    try {
+      const res = await fetch('/config');
+      const { publishable_key } = await res.json();
+      if (!publishable_key || publishable_key.includes('YOUR_')) {
+        showResult('pi-result', 'error', '⚠️ STRIPE_PUBLISHABLE_KEY not set in .env — add pk_test_... and restart server.');
+        document.getElementById('pay-btn').disabled = true;
+        return;
+      }
+      stripe = Stripe(publishable_key);
+      const elements = stripe.elements();
+      cardElement = elements.create('card', {
+        style: {
+          base: { fontSize: '16px', color: '#1a202c', '::placeholder': { color: '#a0aec0' } },
+          invalid: { color: '#e53e3e' }
+        }
+      });
+      cardElement.mount('#card-element');
+      cardElement.on('change', e => {
+        document.getElementById('card-errors').textContent = e.error ? e.error.message : '';
+      });
+    } catch (e) {
+      showResult('pi-result', 'error', 'Cannot reach server. Is uvicorn running on :8000?');
+    }
+  }
+
+  // update button label
+  document.getElementById('pi-amount').addEventListener('input', function() {
+    const v = parseInt(this.value) || 0;
+    const curr = document.getElementById('pi-currency').value.toUpperCase();
+    document.getElementById('pay-amount').textContent = (v / 100).toFixed(2) + ' ' + curr;
+  });
+
+  async function handlePayment() {
+    const btn = document.getElementById('pay-btn');
+    const amount = parseInt(document.getElementById('pi-amount').value);
+    const currency = document.getElementById('pi-currency').value;
+    const description = document.getElementById('pi-description').value;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Creating intent...';
+
+    try {
+      const res = await fetch('/payments/create-intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, currency, description: description || undefined })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+
+      btn.innerHTML = '<span class="spinner"></span>Confirming payment...';
+
+      const result = await stripe.confirmCardPayment(data.client_secret, {
+        payment_method: { card: cardElement }
+      });
+
+      if (result.error) {
+        showResult('pi-result', 'error', '❌ ' + result.error.message);
+      } else {
+        const pi = result.paymentIntent;
+        showResult('pi-result', 'success',
+          `✅ Payment ${pi.status}!\n\nID: ${pi.id}\nAmount: ${(pi.amount/100).toFixed(2)} ${pi.currency.toUpperCase()}`
+        );
+        document.getElementById('rf-pi-id').value = pi.id;
+      }
+    } catch (e) {
+      showResult('pi-result', 'error', '❌ ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Pay <span id="pay-amount">' + (amount/100).toFixed(2) + '</span>';
+    }
+  }
+
+  async function handleCheckout() {
+    const body = {
+      product_name: document.getElementById('cs-name').value,
+      amount: parseInt(document.getElementById('cs-amount').value),
+      currency: document.getElementById('cs-currency').value,
+      quantity: parseInt(document.getElementById('cs-qty').value),
+    };
+    try {
+      const res = await fetch('/checkout/create-session', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail);
+      showResult('cs-result', 'success',
+        `✅ Session created!\n\nID: ${data.session_id}\n\n<a href="${data.url}" target="_blank" style="color:#276749">→ Open Stripe Checkout</a>`
+      );
+    } catch (e) {
+      showResult('cs-result', 'error', '❌ ' + e.message);
+    }
+  }
+
+  async function handleRefund() {
+    const pi_id = document.getElementById('rf-pi-id').value.trim();
+    if (!pi_id) { showResult('rf-result', 'error', 'Enter a Payment Intent ID'); return; }
+    const amount = parseInt(document.getElementById('rf-amount').value) || undefined;
+    try {
+      const res = await fetch('/payments/refund', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_intent_id: pi_id, amount: amount || undefined, reason: document.getElementById('rf-reason').value })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail);
+      showResult('rf-result', 'success',
+        `✅ Refund ${data.status}!\n\nRefund ID: ${data.refund_id}\nAmount: ${(data.amount/100).toFixed(2)}`
+      );
+    } catch (e) {
+      showResult('rf-result', 'error', '❌ ' + e.message);
+    }
+  }
+
+  async function handleCustomer() {
+    const email = document.getElementById('cu-email').value.trim();
+    if (!email) { showResult('cu-result', 'error', 'Enter an email'); return; }
+    try {
+      const res = await fetch('/customers', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, name: document.getElementById('cu-name').value || undefined })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail);
+      showResult('cu-result', 'success', `✅ Customer created!\n\nID: ${data.customer_id}\nEmail: ${data.email}`);
+    } catch (e) {
+      showResult('cu-result', 'error', '❌ ' + e.message);
+    }
+  }
+
+  function showResult(id, type, msg) {
+    const el = document.getElementById(id);
+    el.className = 'result ' + type;
+    el.style.display = 'block';
+    el.innerHTML = msg.replace(/\n/g, '<br/>');
+  }
+
+  function copyCard(el) {
+    const num = el.textContent.split('—')[0].trim().replace(/\s/g, '');
+    navigator.clipboard.writeText(num).then(() => {
+      const orig = el.textContent;
+      el.textContent = '✅ Copied!';
+      setTimeout(() => el.textContent = orig, 1500);
+    });
+  }
+
+  // tabs
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      document.getElementById('tab-' + t.dataset.tab).classList.add('active');
+    });
+  });
+
+  init();
+</script>
+</body>
+</html>
