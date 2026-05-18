@@ -1,6 +1,6 @@
 # Stripe Payment Gateway — FastAPI
 
-Test Stripe payments locally with a FastAPI backend and browser UI.
+FastAPI backend with JWT authentication, Stripe payments, and SQLite persistence.
 
 ---
 
@@ -31,18 +31,21 @@ pip install -r requirements.txt
 
 ### 3. Configure environment
 
-Copy `.env` and fill in your Stripe test keys:
-
 ```bash
 # .env
 STRIPE_SECRET_KEY=sk_test_...
 STRIPE_PUBLISHABLE_KEY=pk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...   # fill after step 6
+STRIPE_WEBHOOK_SECRET=whsec_...        # fill after step 6
 FRONTEND_URL=http://localhost:8000
+JWT_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
-Get keys from [Stripe Dashboard → Developers → API Keys](https://dashboard.stripe.com/test/apikeys).  
-**Both keys must be from the same Stripe account.**
+Get Stripe keys from [Dashboard → Developers → API Keys](https://dashboard.stripe.com/test/apikeys).  
+**Both Stripe keys must be from the same account.**  
+Generate a strong `JWT_SECRET_KEY`:
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
 
 ### 4. Run server
 
@@ -58,23 +61,108 @@ Open `http://localhost:8000` in browser.
 
 ---
 
+## Authentication
+
+All payment, refund, customer, and checkout endpoints require a JWT Bearer token.
+
+### Register
+
+```bash
+curl -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword", "name": "Your Name"}'
+```
+
+### Login
+
+```bash
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'
+```
+
+Response:
+```json
+{ "access_token": "eyJ...", "token_type": "bearer" }
+```
+
+### Use the token
+
+Pass the token in every protected request:
+
+```bash
+curl http://localhost:8000/payments \
+  -H "Authorization: Bearer <access_token>"
+```
+
+### Logout
+
+```bash
+curl -X POST http://localhost:8000/auth/logout \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Token is immediately revoked in the database — reuse returns `401`.
+
+### Get current user
+
+```bash
+curl http://localhost:8000/auth/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Health check |
-| `GET` | `/config` | Returns publishable key for frontend |
-| `POST` | `/payments/create-intent` | Create payment intent (saved to DB) |
-| `GET` | `/payments` | List all payments from DB |
-| `GET` | `/payments/{id}` | Get payment (DB first, falls back to Stripe) |
-| `POST` | `/payments/{id}/retry` | Retry a failed payment |
-| `POST` | `/payments/refund` | Refund a succeeded payment (saved to DB) |
-| `POST` | `/checkout/create-session` | Create Stripe hosted checkout session (saved to DB) |
-| `POST` | `/customers` | Create Stripe customer (saved to DB) |
-| `GET` | `/customers` | List all customers from DB |
-| `POST` | `/webhooks/stripe` | Stripe webhook receiver (updates DB status) |
+### Auth
+
+| Method | Endpoint | Auth required | Description |
+|--------|----------|:---:|-------------|
+| `POST` | `/auth/register` | No | Register new user (email + password) |
+| `POST` | `/auth/login` | No | Login — returns Bearer token |
+| `POST` | `/auth/logout` | Yes | Revoke current token |
+| `GET` | `/auth/me` | Yes | Current user profile |
+
+### Payments
+
+| Method | Endpoint | Auth required | Description |
+|--------|----------|:---:|-------------|
+| `POST` | `/payments/create-intent` | Yes | Create payment intent |
+| `GET` | `/payments` | Yes | List all payments from DB |
+| `GET` | `/payments/{id}` | Yes | Get payment (DB first, falls back to Stripe) |
+| `POST` | `/payments/{id}/retry` | Yes | Retry a failed payment |
+| `POST` | `/payments/refund` | Yes | Refund a succeeded payment |
+
+### Checkout & Customers
+
+| Method | Endpoint | Auth required | Description |
+|--------|----------|:---:|-------------|
+| `POST` | `/checkout/create-session` | Yes | Create Stripe hosted checkout session |
+| `POST` | `/customers` | Yes | Create Stripe customer |
+| `GET` | `/customers` | Yes | List all customers from DB |
+
+### Webhooks & Utility
+
+| Method | Endpoint | Auth required | Description |
+|--------|----------|:---:|-------------|
+| `POST` | `/webhooks/stripe` | No | Stripe webhook receiver |
+| `GET` | `/health` | No | Health check |
+| `GET` | `/config` | No | Returns Stripe publishable key |
+
+---
 
 ### Request bodies
+
+**Register**
+```json
+{ "email": "you@example.com", "password": "yourpassword", "name": "Your Name" }
+```
+
+**Login**
+```json
+{ "email": "you@example.com", "password": "yourpassword" }
+```
 
 **Create Payment Intent**
 ```json
@@ -115,35 +203,31 @@ Use any future expiry date, any 3-digit CVC, any ZIP.
 ### Test refund flow
 
 ```bash
-# 1. Pay with 4242... → note pi_xxx from success message
+TOKEN="Bearer <access_token>"
 
-# 2. Full refund
+# Full refund
 curl -X POST http://localhost:8000/payments/refund \
   -H "Content-Type: application/json" \
+  -H "Authorization: $TOKEN" \
   -d '{"payment_intent_id": "pi_xxx", "reason": "requested_by_customer"}'
 
-# 3. Partial refund (amount in cents)
+# Partial refund (amount in cents)
 curl -X POST http://localhost:8000/payments/refund \
   -H "Content-Type: application/json" \
+  -H "Authorization: $TOKEN" \
   -d '{"payment_intent_id": "pi_xxx", "amount": 1000, "reason": "requested_by_customer"}'
 ```
 
 ### Test retry flow
 
 ```bash
-# 1. Pay with 4000 0000 0000 9995 → note pi_xxx from error message
-
-# 2. Get new client_secret for retry
-curl -X POST http://localhost:8000/payments/pi_xxx/retry
-
-# 3. Use returned client_secret in frontend to re-collect card
+curl -X POST http://localhost:8000/payments/pi_xxx/retry \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
 
 ## Webhook Testing
-
-Webhooks require Stripe CLI to forward events to your local server.
 
 ### 1. Install Stripe CLI
 
@@ -151,8 +235,7 @@ Webhooks require Stripe CLI to forward events to your local server.
 # macOS
 brew install stripe/stripe-cli/stripe
 
-# Linux
-# Download from https://github.com/stripe/stripe-cli/releases
+# Linux — download from https://github.com/stripe/stripe-cli/releases
 ```
 
 ### 2. Login & listen
@@ -162,25 +245,15 @@ stripe login
 stripe listen --forward-to localhost:8000/webhooks/stripe
 ```
 
-Copy the `whsec_...` secret printed in terminal.
+Copy the `whsec_...` secret printed in terminal into `.env`.
 
-### 3. Add webhook secret to `.env`
-
-```
-STRIPE_WEBHOOK_SECRET=whsec_...
-```
-
-Restart server (`Ctrl+C` then `uvicorn app.main:app --reload --port 8000`).
-
-### 4. Trigger test events
+### 3. Trigger test events
 
 ```bash
 stripe trigger payment_intent.succeeded
 stripe trigger payment_intent.payment_failed
 stripe trigger checkout.session.completed
 ```
-
-Server logs will show the event details.
 
 ---
 
@@ -190,6 +263,8 @@ SQLite database (`app/stripe_payments.db`) auto-created on first run.
 
 | Table | Stores |
 |-------|--------|
+| `users` | Registered users (bcrypt hashed passwords) |
+| `revoked_tokens` | Logged-out JWT tokens (for immediate revocation) |
 | `payments` | Payment intents — status updated via webhooks |
 | `refunds` | Refunds issued |
 | `customers` | Stripe customers created |
@@ -202,6 +277,7 @@ SQLite database (`app/stripe_payments.db`) auto-created on first run.
 sqlite3 app/stripe_payments.db
 
 .tables
+SELECT * FROM users;
 SELECT * FROM payments;
 SELECT * FROM customers;
 SELECT * FROM refunds;
@@ -209,10 +285,10 @@ SELECT * FROM webhook_events;
 .quit
 ```
 
-Or via API:
+Or via API (requires auth):
 ```bash
-curl http://localhost:8000/payments
-curl http://localhost:8000/customers
+curl http://localhost:8000/payments -H "Authorization: Bearer <token>"
+curl http://localhost:8000/customers -H "Authorization: Bearer <token>"
 ```
 
 ---
@@ -223,6 +299,7 @@ curl http://localhost:8000/customers
 stripe-fastapi/
 ├── app/
 │   ├── main.py          # FastAPI app, all routes
+│   ├── auth.py          # JWT auth — hashing, token creation, get_current_user
 │   └── database.py      # SQLAlchemy models + SQLite setup
 ├── static/
 │   └── index.html       # Browser test UI
@@ -237,7 +314,10 @@ stripe-fastapi/
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `No such payment_intent` | Secret & publishable keys from different accounts | Use matching key pair from same Stripe account |
+| `401 Invalid token` | Missing or expired Bearer token | Login again to get a fresh token |
+| `401 Token has been revoked` | Token was logged out | Login again |
+| `400 Email already registered` | Duplicate registration | Use different email or just login |
+| `No such payment_intent` | Stripe keys from different accounts | Use matching key pair from same account |
 | `Address already in use` | Port 8000 occupied | `lsof -ti:8000 \| xargs kill` |
-| `Invalid signature` | Wrong webhook secret | Copy `whsec_...` from `stripe listen` output into `.env` |
-| `Cannot refund payment with status 'requires_payment_method'` | Trying to refund a failed payment | Only succeeded payments can be refunded |
+| `Invalid signature` | Wrong webhook secret | Copy `whsec_...` from `stripe listen` into `.env` |
+| `Cannot refund payment with status 'requires_payment_method'` | Refunding a failed payment | Only succeeded payments can be refunded |
